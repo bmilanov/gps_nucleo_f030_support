@@ -1,0 +1,174 @@
+From bc2fd6abf7d7c7d2edac511eedff31ab54e859a7 Mon Sep 17 00:00:00 2001
+From: Biser Milanov <bmilanov11@gmail.com>
+Date: Thu, 14 Sep 2017 18:11:22 +0300
+Subject: [PATCH] Modified rts sources to fit into an stm32f030r8
+
+---
+ arm-eabi/include/rts-sources/common/s-secsta.ads   |  2 +-
+ .../include/rts-sources/gnarl/common/s-taprop.adb  |  2 +-
+ .../include/rts-sources/gnarl/common/s-taskin.adb  |  2 +
+ .../rts-sources/gnarl/mem-small/s-parame.ads       |  4 +-
+ .../rts-sources/gnarl/spinlock-gcc/s-musplo.adb    | 69 ++++++++++++++++++----
+ 5 files changed, 64 insertions(+), 15 deletions(-)
+
+diff --git a/arm-eabi/include/rts-sources/common/s-secsta.ads b/arm-eabi/include/rts-sources/common/s-secsta.ads
+index 56c4615..12e6786 100644
+--- a/arm-eabi/include/rts-sources/common/s-secsta.ads
++++ b/arm-eabi/include/rts-sources/common/s-secsta.ads
+@@ -37,7 +37,7 @@ package System.Secondary_Stack is
+ 
+    package SSE renames System.Storage_Elements;
+ 
+-   Default_Secondary_Stack_Size : constant := 10 * 1024;
++   Default_Secondary_Stack_Size : constant := 256;
+    --  Default size of a secondary stack
+ 
+    Minimum_Secondary_Stack_Size : constant Natural;
+diff --git a/arm-eabi/include/rts-sources/gnarl/common/s-taprop.adb b/arm-eabi/include/rts-sources/gnarl/common/s-taprop.adb
+index ec0070a..b4e4859 100644
+--- a/arm-eabi/include/rts-sources/gnarl/common/s-taprop.adb
++++ b/arm-eabi/include/rts-sources/gnarl/common/s-taprop.adb
+@@ -71,7 +71,7 @@ package body System.Task_Primitives.Operations is
+    --  Procedure executed by an idle task
+ 
+    Idle_Stack_Size : constant System.Storage_Elements.Storage_Count :=
+-     (2048 / Standard'Maximum_Alignment) * Standard'Maximum_Alignment;
++     (256 / Standard'Maximum_Alignment) * Standard'Maximum_Alignment;
+    --  2 KB stacks for each of the idle tasks
+ 
+    type Idle_Stack_Space is
+diff --git a/arm-eabi/include/rts-sources/gnarl/common/s-taskin.adb b/arm-eabi/include/rts-sources/gnarl/common/s-taskin.adb
+index a07a4b5..716d5db 100644
+--- a/arm-eabi/include/rts-sources/gnarl/common/s-taskin.adb
++++ b/arm-eabi/include/rts-sources/gnarl/common/s-taskin.adb
+@@ -192,6 +192,8 @@ package body System.Tasking is
+       --  Only accept CPU'First for CPU value, starting on a slave CPU is not
+       --  supported.
+ 
++      Main_CPU := Unspecified_CPU;
++
+       if Main_CPU /= Unspecified_CPU and then Main_CPU /= Integer (CPU'First)
+       then
+          --  Invalid CPU, will raise Tasking_Error after the environment task
+diff --git a/arm-eabi/include/rts-sources/gnarl/mem-small/s-parame.ads b/arm-eabi/include/rts-sources/gnarl/mem-small/s-parame.ads
+index 1609cbe..55d43c0 100644
+--- a/arm-eabi/include/rts-sources/gnarl/mem-small/s-parame.ads
++++ b/arm-eabi/include/rts-sources/gnarl/mem-small/s-parame.ads
+@@ -77,10 +77,10 @@ package System.Parameters is
+    Sec_Stack_Dynamic : constant Boolean := Sec_Stack_Percentage = Dynamic;
+    --  Convenient Boolean for testing for dynamic secondary stack
+ 
+-   Default_Stack_Size : constant Size_Type := 4 * 1024;
++   Default_Stack_Size : constant Size_Type := 256;
+    --  Default task stack size used if none is specified
+ 
+-   Minimum_Stack_Size : constant Size_Type := 512;
++   Minimum_Stack_Size : constant Size_Type := 256;
+    --  Minimum task stack size permitted
+ 
+    function Adjust_Storage_Size (Size : Size_Type) return Size_Type;
+diff --git a/arm-eabi/include/rts-sources/gnarl/spinlock-gcc/s-musplo.adb b/arm-eabi/include/rts-sources/gnarl/spinlock-gcc/s-musplo.adb
+index 9fa96bd..5d0c5ab 100644
+--- a/arm-eabi/include/rts-sources/gnarl/spinlock-gcc/s-musplo.adb
++++ b/arm-eabi/include/rts-sources/gnarl/spinlock-gcc/s-musplo.adb
+@@ -26,8 +26,14 @@
+ --                                                                          --
+ ------------------------------------------------------------------------------
+ 
++with System.Machine_Code; use System.Machine_Code;
++with Interfaces.STM32; use Interfaces.STM32;
++
+ package body System.Multiprocessors.Spin_Locks is
+ 
++   NL : constant String := ASCII.LF & ASCII.HT;
++   --  New line separator in Asm templates
++
+    ----------
+    -- Lock --
+    ----------
+@@ -59,14 +65,46 @@ package body System.Multiprocessors.Spin_Locks is
+ 
+    procedure Try_Lock (Slock : in out Spin_Lock; Succeeded : out Boolean) is
+ 
+-      function Lock_Test_And_Set
+-        (Ptr   : access Atomic_Flag;
+-         Value : Atomic_Flag)
+-        return Atomic_Flag;
+-      pragma Import (Intrinsic, Lock_Test_And_Set,
+-                       "__sync_lock_test_and_set_1");
++      Success  : UInt32;
++
++      Slock_Addr   : constant Address := Slock.Flag'Address;
++      Success_Addr : constant Address := Success'Address;
++
+    begin
+-      Succeeded := (Lock_Test_And_Set (Slock.Flag'Access, 1) = Unlocked);
++      Asm
++        (Template => "cpsid i",
++         Volatile => True);
++
++      Asm
++        (Template =>
++           "push {r0, r1}" & NL &
++           "ldr r0, %0"    & NL &
++           "ldr r1, [r0]"  & NL &
++           "cmp r1, #0"    & NL &
++           "bne faill%="   & NL &
++           "movs r1, #1"   & NL &
++           "str r1, [r0]"  & NL &
++           "b done%="      & NL &
++           "faill%=:"      & NL &
++           "movs r1, #0"   & NL &
++           "done%=:"       & NL &
++           "ldr r0, %1"    & NL &
++           "str r1, [r0]"  & NL &
++           "pop {r0, r1}",
++         Inputs   => (Address'Asm_Input ("m",  Slock_Addr),
++                      Address'Asm_Input ("m", Success_Addr)),
++         Volatile => True,
++         Clobber  => "memory,r0,r1");
++
++      if Success = 1 then
++         Succeeded := True;
++      else
++         Succeeded := False;
++      end if;
++
++      Asm
++        (Template => "cpsie i",
++         Volatile => True);
+    end Try_Lock;
+ 
+    ------------
+@@ -75,15 +113,24 @@ package body System.Multiprocessors.Spin_Locks is
+ 
+    procedure Unlock (Slock : in out Spin_Lock) is
+ 
+-      procedure Lock_Release (Ptr : access Atomic_Flag);
+-      pragma Import (Intrinsic, Lock_Release,
+-                       "__sync_lock_release_1");
++      Slock_Addr   : constant Address := Slock.Flag'Address;
+ 
+    begin
+       --  Clear Flag. This is a release barrier: all previous memory load
+       --  are satisfied before this write access.
+ 
+-      Lock_Release (Slock.Flag'Access);
++      Asm
++        (Template =>
++           "cpsid i"       & NL &
++           "push {r0, r1}" & NL &
++           "ldr r0, %0"    & NL &
++           "movs r1, #0"   & NL &
++           "str r1, [r0]"  & NL &
++           "pop {r0, r1}"  & NL &
++           "cpsie i",
++         Inputs   => Address'Asm_Input ("m",  Slock_Addr),
++         Volatile => True,
++         Clobber  => "memory,r0,r1");
+    end Unlock;
+ 
+ end System.Multiprocessors.Spin_Locks;
+-- 
+2.9.5
+

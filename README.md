@@ -17,6 +17,8 @@ section.
 
 # Warning
 This patch modifies
+
 > arm-eabi/include/rts-sources/gnarl/spinlock-gcc/s-musplo.adb
+
 Which is needed in its original version when rebuilding bb-runtimes for STM32F4
 MCUs. Do a backup before applying.
